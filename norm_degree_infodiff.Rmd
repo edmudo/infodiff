@@ -1,0 +1,213 @@
+---
+title: "Normalized Degree Ranking and Information Diffusion"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+```{r message=FALSE, warning=FALSE}
+library(readr)
+library(igraph)
+library(dplyr)
+library(ggplot2)
+```
+
+
+```{r}
+prox <- read.csv2("data/Proximity.csv.bz2", header = TRUE, sep = ",") %>%
+  rename("user_id" = user.id)
+subjects <- read.csv("data/Subjects.csv")
+```
+
+
+
+```{r}
+seconds_per_day <- 86400
+prox$time <- lubridate::ymd_hms(prox$time)
+prox$date <- lubridate::date(prox$time)
+split_date <- (prox$date - min(prox$date))/seconds_per_day
+
+# prox <- prox %>% filter(date >= as.Date("2008-01-08"))
+prox_by_day <- split(prox, split_date)
+
+prox_by_day[[1]]
+
+```
+
+
+
+Helper function
+```{r}
+make_graph <- function(df) {
+    df <- df %>%
+    rename("from" = user_id,
+            "to" = remote.user.id.if.known) %>%
+    distinct(from, to, .keep_all = TRUE)
+  g <- graph_from_data_frame(df, directed = FALSE, vertices = subjects$user_id)
+  return(g)
+}
+```
+
+Get degree distribution by day, find normalized rank.
+
+```{r message=FALSE, warning=FALSE}
+n_nodes <- nrow(subjects)
+dg <- data.frame(node = seq(1, n_nodes))
+for (i in 1:length(prox_by_day)) {
+  g <- make_graph(prox_by_day[[i]])
+  temp <- data.frame(degree = degree(g))
+  
+  
+  temp$node <- row.names(temp)
+  temp <- temp %>% arrange(degree)
+  temp$norm_rank <- rank(temp$degree, ties.method = "min")/n_nodes
+  temp$degree <- NULL
+  
+  colnames(temp) <- c("node", as.character(prox_by_day[[i]]$date[1]))
+  dg <- merge(dg, temp, by = "node")
+}
+
+```
+
+
+```{r}
+nr <- tidyr::pivot_longer(dg, cols = -node,
+                        names_to = "date",
+                        values_to = "norm_rank") %>%
+  mutate(date = as.Date(date)) %>%
+  arrange(date)
+
+# limit to where there are consistent networks
+nr <- nr %>%
+  filter(date >= as.Date("2008-10-01"),
+         date <= as.Date("2009-07-01"))
+
+
+ggplot(nr, aes(x = date, y = node, fill = norm_rank)) +
+  geom_raster() +
+  scale_fill_distiller(palette = "GnBu", direction = 1) +
+  scale_x_date(expand = expansion(add =)) +
+  scale_y_continuous(expand = c(0,0)) +
+  theme_classic() +
+  labs(x = "Network (day)",
+       y = "Student",
+       fill = "Normalized \n Rank \n") 
+
+ggsave("out/norm_rank.png", dpi = 500)
+```
+
+# Information Diffusion
+
+Use the voter model to simulate diffusion of information throughout student network at multiple time points during the semester. 
+
+```{r}
+run_voter_model <- function(network, initial_prob_blue, t_steps) {
+  # assign each node red/blue randomly 
+  l <- as_adj_list(network)
+  node_list <- get.data.frame(network, what = "vertices")
+  vote <- rbinom(nrow(node_list), 1, prob = initial_prob_blue)
+  node_list <- cbind(node_list, vote)
+  
+  # timestep voter proportions
+  df_ts <- data.frame(t = NA, prop_red = NA, prop_blue = NA)
+  df_ts$t[1] <- 1
+  df_ts$prop_blue[1] <- nrow(node_list[vote == 1,])/nrow(node_list)
+  df_ts$prop_red[1] <- nrow(node_list[vote == 0,])/nrow(node_list)
+  
+  df_temp <- data.frame(t = NA, prop_blue = NA, prop_red = NA)
+  for (i in 2:t_steps) {
+    # randomly select a node
+    node <- node_list$name[runif(1, min=1, max = nrow(node_list))]
+    
+    # if that node has neighbors, randomly select a neighbor and make the node
+    # vote like the neighbor
+    if (length(l[[node]]) > 0) {
+        # randomly select a neighbor of that node
+        x <- sample(as.character(names(l[[node]])), 1)
+        # make the node vote like the neighbor
+        node_list$vote[node_list$name == node] <- node_list$vote[node_list$name == x]
+    } else next
+    
+    prop_blue <- sum(node_list$vote)/nrow(node_list)
+    
+    df_temp$t <- i
+    df_temp$prop_blue <- prop_blue
+    df_temp$prop_red <- 1 - prop_blue
+    df_ts <- rbind(df_ts, df_temp)
+  }
+  df_ts$prob <- initial_prob_blue
+  return(df_ts)
+}
+
+# much simpler implementation...
+run_voter_graph <- function(network, initial_prob_blue, t_steps) {
+  # g_list <- list()
+  g <- network
+  V(g)$vote <- rbinom(length(V(g)), 1, prob = initial_prob_blue)
+  # g_list[[1]] <- g
+  for (i in 2:t_steps) {
+      # randomly select a node
+    node <- sample(V(g)$name, 1)
+    neigh <- neighbors(g, v = node)
+  
+    if (length(neigh) > 0) {
+      # randomly select a neighbor of that node
+      x <- sample(neigh, 1)
+      # make the node vote like the neighbor
+      V(g)$vote[V(g)$name == node] <- V(g)$vote[V(g)$name == x]
+      # record timestep of change
+      V(g)$timestep[V(g)$name == node] <- i
+      } else next
+    # g_list[[i]] <- g
+  }
+  return(g)
+}
+
+```
+
+Start with initial conditions of 50% blue on randomly selected networks (days) for 2000 timesteps:
+
+```{r}
+day_list <- sort(sample(length(prox_by_day), 10, replace = FALSE))
+g <- make_graph(prox_by_day[[day_list[1]]])
+df <- run_voter_model(g, 0.5, 2000)
+df$day <- paste("day", day_list[1])
+
+for (i in 2:length(day_list)) {
+  g <- make_graph(prox_by_day[[day_list[i]]])
+  df_temp <- run_voter_model(g, 0.5, 2000)
+  df_temp$day <- paste("day", day_list[i])
+  
+  df <- rbind(df, df_temp)
+}
+
+
+ggplot(df, aes(x = t)) +
+  geom_line(aes(y = prop_blue), color = "blue") +
+  geom_line(aes(y = prop_red), color = "red") +
+  facet_wrap(~day) +
+  theme_classic() 
+
+ggsave("out/voter_model.png", dpi = "retina")
+
+
+```
+
+```{r}
+
+for (i in 1:day_list) {
+  g <- make_graph(prox_by_day[[day_list[i]]])
+g_return <- run_voter_graph(g, 0.5, 2000)
+
+V(g_return)$color <- ifelse(V(g_return)$vote == 1, "lightblue", "tomato")
+
+plot(g_return,
+     vertex.color = V(g_return)$color)
+
+}
+
+```
+
+
+
