@@ -1,0 +1,73 @@
+---
+title: "Flu Symptoms"
+output: html_notebook
+---
+
+
+```{r}
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+```
+
+```{r}
+flu <- read.csv("data/FluSymptoms.csv", stringsAsFactors = FALSE)
+```
+
+Call 3 symptoms "the flu"
+```{r}
+flu <- flu %>% 
+  mutate(has_flu = ifelse(sore.throat.cough + runnynose.congestion.sneezing + fever + nausea.vomiting.diarrhea >= 3, 1, 0)) %>%
+  mutate(time = ymd_hms(time)) %>%
+  mutate(date = as.Date(time)) %>%
+  arrange(date)
+
+# if more than one report per day, take the latest
+flu <- flu %>%
+  arrange(user_id, desc(time)) %>%
+  distinct(user_id, date, .keep_all = TRUE)
+
+flu %>% arrange(date)
+```
+
+Summarise by day, limit to school year (there are some strange date values) August 2009
+
+```{r}
+daily_flu <- flu %>%
+  group_by(date) %>%
+  summarize(flu_count = sum(has_flu, na.rm = TRUE))
+daily_flu
+```
+
+Some notes:
+
+* Symptoms reporting didn't start in earnest until second semester
+* There's a strange date (year 2003). I'm removing that.
+* Flu symptoms are in aggregate (e.g., runny nose + congestion + sneezing), so I'm using 3 or greater
+* If a student reported symptoms more than once per day, I took the latest report
+
+
+```{r}
+p1 <- ggplot(daily_flu %>% filter(date > as.Date("2009-01-09")), aes(x = date, y = flu_count)) +
+  geom_line() +
+  labs(title = "Second Semester",
+       y = "")
+p1
+```
+
+```{r}
+p2 <- ggplot(daily_flu %>% filter(date >= as.Date("2009-02-01") & date <= as.Date("2009-02-28")),
+       aes(x = date, y = flu_count)) +
+  geom_line() +
+  labs(title = "February",
+       y = "")
+p2
+```
+
+```{r}
+library(ggpubr)
+p <- ggarrange(p1, p2, ncol=1)
+annotate_figure(p, left = "Students Reporting 3+ Flu-Like Symptoms")
+ggsave("out/flu_symptoms.png", dpi = "retina")
+```
+
